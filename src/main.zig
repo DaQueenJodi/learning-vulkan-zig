@@ -95,6 +95,7 @@ const SwapChainSupportDetails = struct {
 		var formatCount: u32 = undefined;
 		try vkDie(c.vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, null));
 		var formats = try allocator.alloc(c.VkSurfaceFormatKHR, formatCount);
+		try vkDie(c.vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, formats.ptr));
 		var presentModeCount: u32 = undefined;
 		try vkDie(c.vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, null));
 		var presentModes = try allocator.alloc(c.VkPresentModeKHR, presentModeCount);
@@ -123,11 +124,17 @@ const HelloTriangleApplication = struct {
 		presentQueue: c.VkQueue,
     surface: c.VkSurfaceKHR,
 		swapChain: c.VkSwapchainKHR,
+		swapChainImages: ArrayList(c.VkImage),
+		swapChainImageViews: ArrayList(c.VkImageView),
+		swapChainImageFormat: c.VkFormat,
+		swapChainExtent: c.VkExtent2D,
     allocator: Allocator,
     const Self = @This();
     pub fn init(allocator: Allocator) Self {
         var self: Self = undefined;
         self.allocator = allocator;
+				self.swapChainImages = ArrayList(c.VkImage).init(allocator);
+				self.swapChainImageViews = ArrayList(c.VkImageView).init(allocator);
         return self;
     }
     pub fn run(self: *Self) !void {
@@ -149,9 +156,44 @@ const HelloTriangleApplication = struct {
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
 				try self.createSwapChain();
+				try self.createImageViews();
+				try self.createGraphicsPipeline();
     }
+		fn createGraphicsPipeline(self: *Self) !void {
+		    _ = self;
+
+			
+		}
+		fn createImageViews(self: *Self) !void {
+		    try self.swapChainImageViews.resize(self.swapChainImages.items.len);
+				for (self.swapChainImages.items, 0..) |image, n| {
+				    
+					const imageViewCreateInfo: c.VkImageViewCreateInfo = .{
+							.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+							.image = image,
+							.viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+							.format = self.swapChainImageFormat,
+							.components = .{
+								.r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+								.g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+								.b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+								.a = c.VK_COMPONENT_SWIZZLE_IDENTITY
+							},
+							.subresourceRange = .{
+								.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+								.baseMipLevel = 0,
+								.levelCount = 1,
+								.baseArrayLayer = 0,
+								.layerCount = 1
+							},
+							.pNext = null,
+							.flags = 0
+						};
+						try vkDie(c.vkCreateImageView(self.device, &imageViewCreateInfo, null, &self.swapChainImageViews.items[n]));
+				}
+
+		}
 		fn createSwapChain(self: *Self) !void {
-		    
 				var supportDetails = try SwapChainSupportDetails.init(self.allocator, self.physicalDevice, self.surface);
 				defer supportDetails.deinit();
 				const format = chooseSwapSurfaceFormat(supportDetails.formats);
@@ -186,6 +228,11 @@ const HelloTriangleApplication = struct {
 					.flags = 0
 				};
 				try vkDie(c.vkCreateSwapchainKHR(self.device, &swapchainCreateInfo, null, &self.swapChain));
+				var neededImageCount: u32 = undefined;
+				try vkDie(c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &neededImageCount, null));
+				try self.swapChainImages.resize(neededImageCount);
+				try vkDie(c.vkGetSwapchainImagesKHR(self.device, self.swapChain, &neededImageCount, self.swapChainImages.items.ptr));
+				self.swapChainImageFormat = format.format;
 		}
 		fn chooseSwapSurfaceFormat(availableFormats: []c.VkSurfaceFormatKHR) c.VkSurfaceFormatKHR {
 			for (availableFormats) |form| {
@@ -407,6 +454,11 @@ const HelloTriangleApplication = struct {
         }
     }
     fn cleanup(self: *Self) !void {
+				for (self.swapChainImageViews.items) |imageView| {
+						c.vkDestroyImageView(self.device, imageView, null);
+				}
+				self.swapChainImageViews.deinit();
+				self.swapChainImages.deinit();
 				c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
         c.vkDestroyDevice(self.device, null);
         DestroyDebugUtilsMessengerEXT(self.instance, self.debugMessenger, null);

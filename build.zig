@@ -3,7 +3,56 @@ const std = @import("std");
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
+
+const shaderDir = "shaders";
+
+fn compileShaders(self: *std.build.Step, _: *std.Progress.Node) !void {
+	
+	const mem = std.mem;
+	
+
+
+	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+	defer {
+		const status = gpa.deinit();
+		if (status == .leak) @panic("we leaked :(");
+	}
+	const allocator = gpa.allocator();
+	var dir = try std.fs.cwd().openIterableDir(shaderDir, .{});
+	defer dir.close();
+	var iter = dir.iterate();
+	var entry: ?std.fs.IterableDir.Entry = undefined;
+	while (entry != null) : (entry = try iter.next()) {
+		if (entry.?.kind != .file) continue;
+		const srcName = entry.?.name;
+		const prefixStart = mem.lastIndexOfScalar(u8, srcName, '.') orelse srcName.len;
+		if (mem.eql(u8, srcName[prefixStart..], ".spv")) continue;
+		const dstName = try mem.concat(allocator, u8, &[_][]const u8{ srcName[0..prefixStart], ".spv" });
+		defer allocator.free(dstName);
+
+		const srcPath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{shaderDir, srcName});
+		defer allocator.free(srcPath);
+		const dstPath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{shaderDir, dstName});
+		defer allocator.free(dstPath);
+		
+
+		try self.evalChildProcess(
+				&[_][]const u8{
+					"glslc",
+					srcPath,
+					"-o",
+					dstPath
+				}
+		);
+	}
+	
+}
+
 pub fn build(b: *std.Build) void {
+
+		const shaderStep = b.step("shaders", "compile shaders using glslc");
+		shaderStep.makeFn = compileShaders;
+
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -43,6 +92,7 @@ pub fn build(b: *std.Build) void {
     // This is not necessary, however, if the application depends on other installed
     // files, this ensures they will be present and in the expected location.
     run_cmd.step.dependOn(b.getInstallStep());
+		b.getInstallStep().dependOn(shaderStep);
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
