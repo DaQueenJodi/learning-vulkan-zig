@@ -159,6 +159,14 @@ const HelloTriangleApplication = struct {
 		try self.createCommandBuffers();
 		try self.createSyncObjects();
 	}
+	fn recreateSwapChain(self: *Self) !void {
+		try vkDie(c.vkDeviceWaitIdle(self.device));
+		self.cleanupSwapChain();
+
+		try self.createSwapChain();
+		try self.createImageViews();
+		try self.createFramebuffers();
+	}
 	fn createSyncObjects(self: *Self) !void {
 		const semaphoreCreateInfo: c.VkSemaphoreCreateInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
