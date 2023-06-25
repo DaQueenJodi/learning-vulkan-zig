@@ -120,6 +120,7 @@ const HelloTriangleApplication = struct {
 	imageAvailableSemaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore,
 	renderFinishedSemaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore,
 	inFlightFences: [MAX_FRAMES_IN_FLIGHT]c.VkFence,
+	currentFrame: u32,
 	allocator: Allocator,
 	const Self = @This();
 	pub fn init(allocator: Allocator) Self {
@@ -128,6 +129,7 @@ const HelloTriangleApplication = struct {
 		self.swapChainImages = ArrayList(c.VkImage).init(allocator);
 		self.swapChainImageViews = ArrayList(c.VkImageView).init(allocator);
 		self.swapChainFramebuffers = ArrayList(c.VkFramebuffer).init(allocator);
+		self.currentFrame = 0;
 		return self;
 	}
 	pub fn run(self: *Self) !void {
@@ -154,7 +156,7 @@ const HelloTriangleApplication = struct {
 		try self.createGraphicsPipeline();
 		try self.createFramebuffers();
 		try self.createCommandPool();
-		try self.createCommandBuffer();
+		try self.createCommandBuffers();
 		try self.createSyncObjects();
 	}
 	fn createSyncObjects(self: *Self) !void {
@@ -170,19 +172,21 @@ const HelloTriangleApplication = struct {
 			.flags = c.VK_FENCE_CREATE_SIGNALED_BIT
 		};
 		
-
-		try vkDie(c.vkCreateSemaphore(self.device, &semaphoreCreateInfo, null, &self.imageAvailableSemaphore));
-		try vkDie(c.vkCreateSemaphore(self.device, &semaphoreCreateInfo, null, &self.renderFinishedSemaphore));
-		try vkDie(c.vkCreateFence(self.device, &fenceCreateInfo, null, &self.inFlightFence));
+		for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+			try vkDie(c.vkCreateSemaphore(self.device, &semaphoreCreateInfo, null, &self.imageAvailableSemaphores[i]));
+			try vkDie(c.vkCreateSemaphore(self.device, &semaphoreCreateInfo, null, &self.renderFinishedSemaphores[i]));
+			try vkDie(c.vkCreateFence(self.device, &fenceCreateInfo, null, &self.inFlightFences[i]));
+		}
 	}
-	fn recordCommandBuffer(self: *Self, imageIndex: usize) !void {
+	fn recordCommandBuffer(self: *Self, commandBuffer: c.VkCommandBuffer, imageIndex: usize) !void {
+		
 		const bufferBeginInfo: c.VkCommandBufferBeginInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 			.pInheritanceInfo = null,
 			.pNext = null,
 			.flags = 0,
 		};
-		
+
 
 		const renderPassBeginInfo: c.VkRenderPassBeginInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -193,9 +197,9 @@ const HelloTriangleApplication = struct {
 			.pClearValues = &c.VkClearValue{ .color = .{ .float32 = .{ 0, 0, 0, 1 } } },
 			.pNext = null,
 		};
-		try vkDie(c.vkBeginCommandBuffer(self.commandBuffer, &bufferBeginInfo));
-		c.vkCmdBeginRenderPass(self.commandBuffer, &renderPassBeginInfo, c.VK_SUBPASS_CONTENTS_INLINE);
-		c.vkCmdBindPipeline(self.commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphicsPipeline);
+		try vkDie(c.vkBeginCommandBuffer(commandBuffer, &bufferBeginInfo));
+		c.vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, c.VK_SUBPASS_CONTENTS_INLINE);
+		c.vkCmdBindPipeline(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphicsPipeline);
 		const viewport: c.VkViewport = .{
 			.x = 0.0,
 			.y = 0.0,
@@ -204,24 +208,24 @@ const HelloTriangleApplication = struct {
 			.minDepth = 0.0,
 			.maxDepth = 1.0
 		};
-		c.vkCmdSetViewport(self.commandBuffer, 0, 1, &viewport);
+		c.vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-		c.vkCmdSetScissor(self.commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
+		c.vkCmdSetScissor(commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
 
-		c.vkCmdDraw(self.commandBuffer, 3, 1, 0, 0);
+		c.vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
-		c.vkCmdEndRenderPass(self.commandBuffer);
-		try vkDie(c.vkEndCommandBuffer(self.commandBuffer));
+		c.vkCmdEndRenderPass(commandBuffer);
+		try vkDie(c.vkEndCommandBuffer(commandBuffer));
 	}
-	fn createCommandBuffer(self: *Self) !void {
+	fn createCommandBuffers(self: *Self) !void {
 		const allocInfo: c.VkCommandBufferAllocateInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 			.commandPool = self.commandPool,
 			.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-			.commandBufferCount = 1,
+			.commandBufferCount = MAX_FRAMES_IN_FLIGHT,
 			.pNext = null
 		};
-		try vkDie(c.vkAllocateCommandBuffers(self.device, &allocInfo, &self.commandBuffer));
+		try vkDie(c.vkAllocateCommandBuffers(self.device, &allocInfo, &self.commandBuffers));
 	}
 	fn createCommandPool(self: *Self) !void {
 		const indices = try self.findQueueFamilies(self.physicalDevice);
@@ -739,34 +743,34 @@ const HelloTriangleApplication = struct {
 		try vkDie(c.vkCreateInstance(&createInfo, null, &self.instance));
 	}
 	fn drawFrame(self: *Self) !void {
-		try vkDie(c.vkWaitForFences(self.device, 1, &self.inFlightFence, c.VK_TRUE, std.math.maxInt(u64)));
-		try vkDie(c.vkResetFences(self.device, 1, &self.inFlightFence));
+		try vkDie(c.vkWaitForFences(self.device, 1, &self.inFlightFences[self.currentFrame], c.VK_TRUE, std.math.maxInt(u64)));
+		try vkDie(c.vkResetFences(self.device, 1, &self.inFlightFences[self.currentFrame]));
 
 		var imageIndex: u32 = undefined;
-		try vkDie(c.vkAcquireNextImageKHR(self.device, self.swapChain, std.math.maxInt(u64), self.imageAvailableSemaphore, null, &imageIndex));
+		try vkDie(c.vkAcquireNextImageKHR(self.device, self.swapChain, std.math.maxInt(u64), self.imageAvailableSemaphores[self.currentFrame], null, &imageIndex));
 
-		try vkDie(c.vkResetCommandBuffer(self.commandBuffer, 0));
+		try vkDie(c.vkResetCommandBuffer(self.commandBuffers[self.currentFrame], 0));
 
-		try self.recordCommandBuffer(imageIndex);
+		try self.recordCommandBuffer(self.commandBuffers[self.currentFrame], imageIndex);
 
 		const submitInfo: c.VkSubmitInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
 			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = &self.imageAvailableSemaphore,
+			.pWaitSemaphores = &self.imageAvailableSemaphores[self.currentFrame],
 			.pWaitDstStageMask = &@intCast(c.VkPipelineStageFlags, c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
 			.commandBufferCount = 1,
-			.pCommandBuffers = &self.commandBuffer,
+			.pCommandBuffers = &self.commandBuffers[self.currentFrame],
 			.signalSemaphoreCount = 1,
-			.pSignalSemaphores = &self.renderFinishedSemaphore,
+			.pSignalSemaphores = &self.renderFinishedSemaphores[self.currentFrame],
 			.pNext = null,
 		};
 
-		try vkDie(c.vkQueueSubmit(self.graphicsQueue, 1, &submitInfo, self.inFlightFence));
+		try vkDie(c.vkQueueSubmit(self.graphicsQueue, 1, &submitInfo, self.inFlightFences[self.currentFrame]));
 
 		const presentInfo: c.VkPresentInfoKHR = .{
 			.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = &self.renderFinishedSemaphore,
+			.pWaitSemaphores = &self.renderFinishedSemaphores[self.currentFrame],
 			.swapchainCount = 1,
 			.pSwapchains = &self.swapChain,
 			.pImageIndices = &imageIndex,
@@ -775,6 +779,9 @@ const HelloTriangleApplication = struct {
 		};
 
 		try vkDie(c.vkQueuePresentKHR(self.presentQueue, &presentInfo));
+
+
+		self.currentFrame = (self.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 	}
 	fn mainLoop(self: *Self) !void {
 		while (c.glfwWindowShouldClose(self.window) == c.GLFW_FALSE) {
@@ -785,9 +792,11 @@ const HelloTriangleApplication = struct {
 		try vkDie(c.vkDeviceWaitIdle(self.device));
 	}
 	fn cleanup(self: *Self) !void {
-		c.vkDestroySemaphore(self.device,  self.imageAvailableSemaphore, null);
-		c.vkDestroySemaphore(self.device,  self.renderFinishedSemaphore, null);
-		c.vkDestroyFence(self.device, self.inFlightFence, null);
+		for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+			c.vkDestroySemaphore(self.device,  self.imageAvailableSemaphores[i], null);
+			c.vkDestroySemaphore(self.device,  self.renderFinishedSemaphores[i], null);
+			c.vkDestroyFence(self.device, self.inFlightFences[i], null);
+		}
 		c.vkDestroyCommandPool(self.device, self.commandPool, null);
 		for (self.swapChainFramebuffers.items) |framebuffer| {
 			c.vkDestroyFramebuffer(self.device, framebuffer, null);
