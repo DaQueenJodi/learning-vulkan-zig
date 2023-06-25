@@ -1,0 +1,7 @@
+{
+	"properties": {
+		"enable_snippets": false,
+		"enable_autofix": false,
+		"semantic_tokens": false
+	}
+}

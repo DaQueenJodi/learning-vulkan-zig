@@ -8,10 +8,6 @@ const shaderDir = "shaders";
 
 fn compileShaders(self: *std.build.Step, _: *std.Progress.Node) !void {
 	
-	const mem = std.mem;
-	
-
-
 	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 	defer {
 		const status = gpa.deinit();
@@ -25,14 +21,11 @@ fn compileShaders(self: *std.build.Step, _: *std.Progress.Node) !void {
 	while (entry != null) : (entry = try iter.next()) {
 		if (entry.?.kind != .file) continue;
 		const srcName = entry.?.name;
-		const prefixStart = mem.lastIndexOfScalar(u8, srcName, '.') orelse srcName.len;
-		if (mem.eql(u8, srcName[prefixStart..], ".spv")) continue;
-		const dstName = try mem.concat(allocator, u8, &[_][]const u8{ srcName[0..prefixStart], ".spv" });
-		defer allocator.free(dstName);
-
+		// ignore already compiled files
+		if (std.mem.eql(u8, std.fs.path.extension(srcName), ".spv")) continue;
 		const srcPath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{shaderDir, srcName});
 		defer allocator.free(srcPath);
-		const dstPath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{shaderDir, dstName});
+		const dstPath = try std.fmt.allocPrint(allocator, "{s}/{s}.spv", .{shaderDir, srcName});
 		defer allocator.free(dstPath);
 		
 
