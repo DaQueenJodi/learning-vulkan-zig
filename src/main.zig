@@ -13,7 +13,6 @@ const validationLayers = [_][*c]const u8{"VK_LAYER_KHRONOS_validation"};
 
 const deviceExtensions = [_][*c]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
-
 fn vkDie(res: c.VkResult) !void {
 	return switch (res) {
 		c.VK_SUCCESS => {},
@@ -37,7 +36,7 @@ fn vkDie(res: c.VkResult) !void {
 		c.VK_ERROR_INVALID_EXTERNAL_HANDLE => error.VkInvalidExternalHandle,
 		c.VK_ERROR_FRAGMENTATION => error.VkFragmentationError,
 		c.VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS => error.VkInvalidOpaqueCaptureAddress,
-		else => @panic("invalid VK_RESULT"),
+		else => error.VkUnknownError
 	};
 }
 
@@ -56,7 +55,7 @@ allocator: ?*c.VkAllocationCallbacks,
 ) void {
 	const func = @ptrCast(c.PFN_vkDestroyDebugUtilsMessengerEXT, c.vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
 	if (func != null) {
-	(func.?)(instance, debugMessenger, allocator);
+		(func.?)(instance, debugMessenger, allocator);
 	} else {
 		@panic("failed to load DestroyDebugUtilsMessengerEXT");
 	}
@@ -121,6 +120,7 @@ const HelloTriangleApplication = struct {
 	renderFinishedSemaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore,
 	inFlightFences: [MAX_FRAMES_IN_FLIGHT]c.VkFence,
 	currentFrame: u32,
+	frameResized: bool,
 	allocator: Allocator,
 	const Self = @This();
 	pub fn init(allocator: Allocator) Self {
@@ -130,6 +130,7 @@ const HelloTriangleApplication = struct {
 		self.swapChainImageViews = ArrayList(c.VkImageView).init(allocator);
 		self.swapChainFramebuffers = ArrayList(c.VkFramebuffer).init(allocator);
 		self.currentFrame = 0;
+		self.frameResized = false;
 		return self;
 	}
 	pub fn run(self: *Self) !void {
@@ -138,11 +139,17 @@ const HelloTriangleApplication = struct {
 		try self.mainLoop();
 		try self.cleanup();
 	}
+	fn framebufferResizeCallback(window: ?*c.GLFWwindow, _: i32, _: i32) callconv(.C) void {
+		const self = @ptrCast(*@This(), @alignCast(@alignOf(*@This()), c.glfwGetWindowUserPointer(window)));
+		self.frameResized = true;
+	}
 	fn initWindow(self: *Self) !void {
 		if (c.glfwInit() == c.GLFW_FALSE) return error.FailedInitGLFW;
 		c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
 		c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_FALSE);
 		self.window = c.glfwCreateWindow(SCREEN_W, SCREEN_H, "uwu", null, null) orelse return error.FailedCreateWindow;
+		c.glfwSetWindowUserPointer(self.window, self);
+		_ = c.glfwSetFramebufferSizeCallback(self.window, framebufferResizeCallback);
 	}
 	fn initVulkan(self: *Self) !void {
 		try self.createInstance();
@@ -159,42 +166,49 @@ const HelloTriangleApplication = struct {
 		try self.createCommandBuffers();
 		try self.createSyncObjects();
 	}
+	fn cleanupSwapChain(self: *Self) void {
+		for (self.swapChainFramebuffers.items) |framebuffer| {
+			c.vkDestroyFramebuffer(self.device, framebuffer, null);
+		}
+		for (self.swapChainImageViews.items) |imageView| {
+			c.vkDestroyImageView(self.device, imageView, null);
+		}
+		c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
+	}
 	fn recreateSwapChain(self: *Self) !void {
+		std.log.info("recreating swapchain!\n", .{});
 		try vkDie(c.vkDeviceWaitIdle(self.device));
+
 		self.cleanupSwapChain();
 
 		try self.createSwapChain();
 		try self.createImageViews();
 		try self.createFramebuffers();
+		
+		std.log.info("done recreating swapchain!\n", .{});
 	}
 	fn createSyncObjects(self: *Self) !void {
-		const semaphoreCreateInfo: c.VkSemaphoreCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-			.pNext = null,
-			.flags = 0
-		};
+		const semaphoreCreateInfo: c.VkSemaphoreCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = null, .flags = 0 };
 		const fenceCreateInfo: c.VkFenceCreateInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
 			.pNext = null,
 			// so first vkWaitForFences doesnt block
-			.flags = c.VK_FENCE_CREATE_SIGNALED_BIT
+			.flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
 		};
-		
-		for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+
+	for (0..MAX_FRAMES_IN_FLIGHT) |i| {
 			try vkDie(c.vkCreateSemaphore(self.device, &semaphoreCreateInfo, null, &self.imageAvailableSemaphores[i]));
 			try vkDie(c.vkCreateSemaphore(self.device, &semaphoreCreateInfo, null, &self.renderFinishedSemaphores[i]));
 			try vkDie(c.vkCreateFence(self.device, &fenceCreateInfo, null, &self.inFlightFences[i]));
 		}
 	}
 	fn recordCommandBuffer(self: *Self, commandBuffer: c.VkCommandBuffer, imageIndex: usize) !void {
-		
 		const bufferBeginInfo: c.VkCommandBufferBeginInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 			.pInheritanceInfo = null,
 			.pNext = null,
 			.flags = 0,
 		};
-
 
 		const renderPassBeginInfo: c.VkRenderPassBeginInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -208,14 +222,7 @@ const HelloTriangleApplication = struct {
 		try vkDie(c.vkBeginCommandBuffer(commandBuffer, &bufferBeginInfo));
 		c.vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, c.VK_SUBPASS_CONTENTS_INLINE);
 		c.vkCmdBindPipeline(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphicsPipeline);
-		const viewport: c.VkViewport = .{
-			.x = 0.0,
-			.y = 0.0,
-			.width = @floatFromInt(f32, self.swapChainExtent.width),
-			.height = @floatFromInt(f32, self.swapChainExtent.height),
-			.minDepth = 0.0,
-			.maxDepth = 1.0
-		};
+		const viewport: c.VkViewport = .{ .x = 0.0, .y = 0.0, .width = @floatFromInt(f32, self.swapChainExtent.width), .height = @floatFromInt(f32, self.swapChainExtent.height), .minDepth = 0.0, .maxDepth = 1.0 };
 		c.vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
 		c.vkCmdSetScissor(commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
@@ -226,18 +233,12 @@ const HelloTriangleApplication = struct {
 		try vkDie(c.vkEndCommandBuffer(commandBuffer));
 	}
 	fn createCommandBuffers(self: *Self) !void {
-		const allocInfo: c.VkCommandBufferAllocateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-			.commandPool = self.commandPool,
-			.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-			.commandBufferCount = MAX_FRAMES_IN_FLIGHT,
-			.pNext = null
-		};
+		const allocInfo: c.VkCommandBufferAllocateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = self.commandPool, .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = MAX_FRAMES_IN_FLIGHT, .pNext = null };
 		try vkDie(c.vkAllocateCommandBuffers(self.device, &allocInfo, &self.commandBuffers));
 	}
 	fn createCommandPool(self: *Self) !void {
 		const indices = try self.findQueueFamilies(self.physicalDevice);
-		
+
 		const commandPoolCreateInfo: c.VkCommandPoolCreateInfo = .{
 			.sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 			.flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -249,53 +250,18 @@ const HelloTriangleApplication = struct {
 	}
 	fn createFramebuffers(self: *Self) !void {
 		try self.swapChainFramebuffers.resize(self.swapChainImageViews.items.len);
-		for (0..self.swapChainImageViews.items.len) |i| {
-			const framebufferCreateInfo: c.VkFramebufferCreateInfo = .{
-				.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-				.renderPass = self.renderPass,
-				.attachmentCount = 1,
-				.pAttachments = &self.swapChainImageViews.items[i],
-				.width = self.swapChainExtent.width,
-				.height = self.swapChainExtent.height,
-				.layers = 1,
-				.pNext = null,
-				.flags = 0
-			};
+	for (0..self.swapChainImageViews.items.len) |i| {
+			const framebufferCreateInfo: c.VkFramebufferCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = self.renderPass, .attachmentCount = 1, .pAttachments = &self.swapChainImageViews.items[i], .width = self.swapChainExtent.width, .height = self.swapChainExtent.height, .layers = 1, .pNext = null, .flags = 0 };
 			try vkDie(c.vkCreateFramebuffer(self.device, &framebufferCreateInfo, null, &self.swapChainFramebuffers.items[i]));
 		}
 	}
 	fn createRenderPass(self: *Self) !void {
-		const colorAttachmentDescription: c.VkAttachmentDescription = .{
-			.format = self.swapChainImageFormat,
-			.samples = c.VK_SAMPLE_COUNT_1_BIT,
-			.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
-			.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
-			.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-			.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-			.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-			.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-			.flags = 0
-		};
-		
+		const colorAttachmentDescription: c.VkAttachmentDescription = .{ .format = self.swapChainImageFormat, .samples = c.VK_SAMPLE_COUNT_1_BIT, .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .flags = 0 };
 
-		const colorAttachmentRef: c.VkAttachmentReference = .{
-			.attachment = 0,
-			.layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-		};
+		const colorAttachmentRef: c.VkAttachmentReference = .{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
 
-		const subpassDescription: c.VkSubpassDescription = .{
-			.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-			.colorAttachmentCount = 1,
-			.pColorAttachments = &colorAttachmentRef,
-			.inputAttachmentCount = 0,
-			.pInputAttachments = null,
-			.pDepthStencilAttachment = null,
-			.pResolveAttachments = null,
-			.preserveAttachmentCount = 0,
-			.pPreserveAttachments = null,
-			.flags = 0
-		};
-		
+		const subpassDescription: c.VkSubpassDescription = .{ .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &colorAttachmentRef, .inputAttachmentCount = 0, .pInputAttachments = null, .pDepthStencilAttachment = null, .pResolveAttachments = null, .preserveAttachmentCount = 0, .pPreserveAttachments = null, .flags = 0 };
+
 		const subpassDependency: c.VkSubpassDependency = .{
 			.srcSubpass = c.VK_SUBPASS_EXTERNAL,
 			.dstSubpass = 0,
@@ -305,32 +271,13 @@ const HelloTriangleApplication = struct {
 			.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 			.dependencyFlags = 0,
 		};
-		
 
-		const renderPassCreateInfo: c.VkRenderPassCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-			.attachmentCount = 1,
-			.pAttachments = &colorAttachmentDescription,
-			.subpassCount = 1,
-			.pSubpasses = &subpassDescription,
-			.dependencyCount = 1,
-			.pDependencies = &subpassDependency,
-			.pNext = null,
-			.flags = 0
-		};
+		const renderPassCreateInfo: c.VkRenderPassCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &colorAttachmentDescription, .subpassCount = 1, .pSubpasses = &subpassDescription, .dependencyCount = 1, .pDependencies = &subpassDependency, .pNext = null, .flags = 0 };
 
 		try vkDie(c.vkCreateRenderPass(self.device, &renderPassCreateInfo, null, &self.renderPass));
-
 	}
 	fn createShaderModule(self: *Self, code: []u8) !c.VkShaderModule {
-
-		const shaderModuleCreateInfo: c.VkShaderModuleCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-			.codeSize = code.len,
-			.pCode = @ptrCast(*u32, @alignCast(@alignOf(*u32), code.ptr)),
-			.pNext = null,
-			.flags = 0
-		};
+		const shaderModuleCreateInfo: c.VkShaderModuleCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = code.len, .pCode = @ptrCast(*u32, @alignCast(@alignOf(*u32), code.ptr)), .pNext = null, .flags = 0 };
 		var shaderModule: c.VkShaderModule = undefined;
 		try vkDie(c.vkCreateShaderModule(self.device, &shaderModuleCreateInfo, null, &shaderModule));
 		return shaderModule;
@@ -338,222 +285,58 @@ const HelloTriangleApplication = struct {
 	fn createGraphicsPipeline(self: *Self) !void {
 		const vertShaderCode = try helper.readFile(self.allocator, "shaders/shader.vert.spv");
 		defer self.allocator.free(vertShaderCode);
-		
+
 		const fragShaderCode = try helper.readFile(self.allocator, "shaders/shader.frag.spv");
 		defer self.allocator.free(fragShaderCode);
-		
+
 		const vertShaderModule = try self.createShaderModule(vertShaderCode);
 		defer c.vkDestroyShaderModule(self.device, vertShaderModule, null);
 		const fragShaderModule = try self.createShaderModule(fragShaderCode);
 		defer c.vkDestroyShaderModule(self.device, fragShaderModule, null);
 
-		const vertShaderCreateInfo: c.VkPipelineShaderStageCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.stage = c.VK_SHADER_STAGE_VERTEX_BIT,
-			.module = vertShaderModule,
-			.pName = "main",
-			.pSpecializationInfo = null,
-			.pNext = null,
-			.flags = 0
-		};
+		const vertShaderCreateInfo: c.VkPipelineShaderStageCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vertShaderModule, .pName = "main", .pSpecializationInfo = null, .pNext = null, .flags = 0 };
 
-		const fragShaderCreateInfo: c.VkPipelineShaderStageCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.stage = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-			.module = fragShaderModule,
-			.pName = "main",
-			.pSpecializationInfo = null,
-			.pNext = null,
-			.flags = 0
-		};
-		
-		
+		const fragShaderCreateInfo: c.VkPipelineShaderStageCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragShaderModule, .pName = "main", .pSpecializationInfo = null, .pNext = null, .flags = 0 };
 
-		const shaderStages = [_]c.VkPipelineShaderStageCreateInfo {
-			vertShaderCreateInfo,
-			fragShaderCreateInfo
-		};
-		
+		const shaderStages = [_]c.VkPipelineShaderStageCreateInfo{ vertShaderCreateInfo, fragShaderCreateInfo };
 
-		const vertexInputCreateInfo: c.VkPipelineVertexInputStateCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-			.vertexBindingDescriptionCount = 0,
-			.pVertexBindingDescriptions = null,
-			.vertexAttributeDescriptionCount = 0,
-			.pVertexAttributeDescriptions = null,
-			.pNext = null,
-			.flags = 0
-		};
-		
+		const vertexInputCreateInfo: c.VkPipelineVertexInputStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .vertexBindingDescriptionCount = 0, .pVertexBindingDescriptions = null, .vertexAttributeDescriptionCount = 0, .pVertexAttributeDescriptions = null, .pNext = null, .flags = 0 };
 
-		const inputAssemblyCreateInfo: c.VkPipelineInputAssemblyStateCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-			.topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-			.primitiveRestartEnable = c.VK_FALSE,
-			.pNext = null,
-			.flags = 0
-		};
-		
+		const inputAssemblyCreateInfo: c.VkPipelineInputAssemblyStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, .primitiveRestartEnable = c.VK_FALSE, .pNext = null, .flags = 0 };
 
-		const viewport: c.VkViewport = .{
-			.x = 0.0,
-			.y = 0.0,
-			.width = @floatFromInt(f32, self.swapChainExtent.width),
-			.height = @floatFromInt(f32, self.swapChainExtent.height),
-			.minDepth = 0.0,
-			.maxDepth = 1.0
-		};
-		
+		const viewport: c.VkViewport = .{ .x = 0.0, .y = 0.0, .width = @floatFromInt(f32, self.swapChainExtent.width), .height = @floatFromInt(f32, self.swapChainExtent.height), .minDepth = 0.0, .maxDepth = 1.0 };
 
-		const scissor: c.VkRect2D = .{
-			.offset = .{ .x = 0, .y = 0 },
-			.extent = self.swapChainExtent
-		};
-		
+		const scissor: c.VkRect2D = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapChainExtent };
 
-		const viewPortCreateInfo: c.VkPipelineViewportStateCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-			.viewportCount = 1,
-			.pViewports = &viewport,
-			.scissorCount = 1,
-			.pScissors = &scissor,
-			.pNext = null,
-			.flags = 0
-		};
-		
+		const viewPortCreateInfo: c.VkPipelineViewportStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor, .pNext = null, .flags = 0 };
 
-		const rasterizationCreateInfo: c.VkPipelineRasterizationStateCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-			.depthClampEnable = c.VK_FALSE,
-			.rasterizerDiscardEnable = c.VK_FALSE,
-			.polygonMode = c.VK_POLYGON_MODE_FILL,
-			.lineWidth = 1.0,
-			.cullMode = c.VK_CULL_MODE_BACK_BIT,
-			.frontFace = c.VK_FRONT_FACE_CLOCKWISE,
-			.depthBiasEnable = c.VK_FALSE,
-			.depthBiasConstantFactor = 0.0,
-			.depthBiasClamp = 0.0,
-			.depthBiasSlopeFactor = 0.0,
-			.pNext = null,
-			.flags = 0
-		};
-		
+		const rasterizationCreateInfo: c.VkPipelineRasterizationStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .depthClampEnable = c.VK_FALSE, .rasterizerDiscardEnable = c.VK_FALSE, .polygonMode = c.VK_POLYGON_MODE_FILL, .lineWidth = 1.0, .cullMode = c.VK_CULL_MODE_BACK_BIT, .frontFace = c.VK_FRONT_FACE_CLOCKWISE, .depthBiasEnable = c.VK_FALSE, .depthBiasConstantFactor = 0.0, .depthBiasClamp = 0.0, .depthBiasSlopeFactor = 0.0, .pNext = null, .flags = 0 };
 
+		const multiSamplingCreateInfo: c.VkPipelineMultisampleStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .sampleShadingEnable = c.VK_FALSE, .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT, .minSampleShading = 1.0, .pSampleMask = null, .alphaToCoverageEnable = c.VK_FALSE, .alphaToOneEnable = c.VK_FALSE, .pNext = null, .flags = 0 };
 
-		const multiSamplingCreateInfo: c.VkPipelineMultisampleStateCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-			.sampleShadingEnable = c.VK_FALSE,
-			.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
-			.minSampleShading = 1.0,
-			.pSampleMask = null,
-			.alphaToCoverageEnable = c.VK_FALSE,
-			.alphaToOneEnable = c.VK_FALSE,
-			.pNext = null,
-			.flags = 0
-		};
-		
-		const colorBlendAttachment: c.VkPipelineColorBlendAttachmentState = .{
-			.colorWriteMask =
-			c.VK_COLOR_COMPONENT_R_BIT |
+		const colorBlendAttachment: c.VkPipelineColorBlendAttachmentState = .{ .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT |
 			c.VK_COLOR_COMPONENT_G_BIT |
 			c.VK_COLOR_COMPONENT_B_BIT |
-			c.VK_COLOR_COMPONENT_A_BIT,
-			.blendEnable = c.VK_FALSE,
-			.srcColorBlendFactor = c.VK_BLEND_FACTOR_ONE,
-			.dstColorBlendFactor = c.VK_BLEND_FACTOR_ZERO,
-			.colorBlendOp = c.VK_BLEND_OP_ADD,
-			.srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE,
-			.dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO,
-			.alphaBlendOp = c.VK_BLEND_OP_ADD
+			c.VK_COLOR_COMPONENT_A_BIT, .blendEnable = c.VK_FALSE, .srcColorBlendFactor = c.VK_BLEND_FACTOR_ONE, .dstColorBlendFactor = c.VK_BLEND_FACTOR_ZERO, .colorBlendOp = c.VK_BLEND_OP_ADD, .srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO, .alphaBlendOp = c.VK_BLEND_OP_ADD };
 
-		};
-		
+		const colorBlendCreateInfo: c.VkPipelineColorBlendStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .logicOpEnable = c.VK_FALSE, .logicOp = c.VK_LOGIC_OP_COPY, .attachmentCount = 1, .pAttachments = &colorBlendAttachment, .blendConstants = std.mem.zeroes([4]f32), .pNext = null, .flags = 0 };
 
-		const colorBlendCreateInfo: c.VkPipelineColorBlendStateCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-			.logicOpEnable = c.VK_FALSE,
-			.logicOp = c.VK_LOGIC_OP_COPY,
-			.attachmentCount = 1,
-			.pAttachments = &colorBlendAttachment,
-			.blendConstants = std.mem.zeroes([4]f32),
-			.pNext = null,
-			.flags = 0
-		};
-		
-
-		const pipelineLayoutCreateInfo: c.VkPipelineLayoutCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-			.setLayoutCount = 0,
-			.pSetLayouts = null,
-			.pushConstantRangeCount = 0,
-			.pPushConstantRanges = null,
-			.pNext = null,
-			.flags = 0
-		};
+		const pipelineLayoutCreateInfo: c.VkPipelineLayoutCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 0, .pSetLayouts = null, .pushConstantRangeCount = 0, .pPushConstantRanges = null, .pNext = null, .flags = 0 };
 
 		try vkDie(c.vkCreatePipelineLayout(self.device, &pipelineLayoutCreateInfo, null, &self.pipelineLayout));
 
-		const dynamicStates = [_]c.VkDynamicState { 
-			c.VK_DYNAMIC_STATE_VIEWPORT,
-			c.VK_DYNAMIC_STATE_SCISSOR
-		};
+		const dynamicStates = [_]c.VkDynamicState{ c.VK_DYNAMIC_STATE_VIEWPORT, c.VK_DYNAMIC_STATE_SCISSOR };
 
-		const dynamicCreateInfo: c.VkPipelineDynamicStateCreateInfo  = .{
-			.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-			.dynamicStateCount = @intCast(u32, dynamicStates.len),
-			.pDynamicStates = &dynamicStates,
-			.pNext = null,
-			.flags = 0
-		};
+		const dynamicCreateInfo: c.VkPipelineDynamicStateCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = @intCast(u32, dynamicStates.len), .pDynamicStates = &dynamicStates, .pNext = null, .flags = 0 };
 
-		const pipelineCreateInfo: c.VkGraphicsPipelineCreateInfo = .{
-			.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-			.stageCount = 2,
-			.pStages = &shaderStages,
-			.pVertexInputState = &vertexInputCreateInfo,
-			.pInputAssemblyState = &inputAssemblyCreateInfo,
-			.pViewportState = &viewPortCreateInfo,
-			.pRasterizationState = &rasterizationCreateInfo,
-			.pMultisampleState = &multiSamplingCreateInfo,
-			.pDepthStencilState = null,
-			.pColorBlendState = &colorBlendCreateInfo,
-			.pDynamicState = &dynamicCreateInfo,
-			.pTessellationState = null,
-			.layout = self.pipelineLayout,
-			.renderPass = self.renderPass,
-			.subpass = 0,
-			.basePipelineHandle = null,
-			.basePipelineIndex = -1,
-			.pNext = null,
-			.flags = 0
-		};
+		const pipelineCreateInfo: c.VkGraphicsPipelineCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = &shaderStages, .pVertexInputState = &vertexInputCreateInfo, .pInputAssemblyState = &inputAssemblyCreateInfo, .pViewportState = &viewPortCreateInfo, .pRasterizationState = &rasterizationCreateInfo, .pMultisampleState = &multiSamplingCreateInfo, .pDepthStencilState = null, .pColorBlendState = &colorBlendCreateInfo, .pDynamicState = &dynamicCreateInfo, .pTessellationState = null, .layout = self.pipelineLayout, .renderPass = self.renderPass, .subpass = 0, .basePipelineHandle = null, .basePipelineIndex = -1, .pNext = null, .flags = 0 };
 
 		try vkDie(c.vkCreateGraphicsPipelines(self.device, null, 1, &pipelineCreateInfo, null, &self.graphicsPipeline));
-
 	}
 	fn createImageViews(self: *Self) !void {
 		try self.swapChainImageViews.resize(self.swapChainImages.items.len);
-		for (self.swapChainImages.items, 0..) |image, n| {
-			const imageViewCreateInfo: c.VkImageViewCreateInfo = .{
-				.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.image = image,
-				.viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-				.format = self.swapChainImageFormat,
-				.components = .{
-					.r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-					.g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-					.b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-					.a = c.VK_COMPONENT_SWIZZLE_IDENTITY },
-				.subresourceRange = .{
-					.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-					.baseMipLevel = 0,
-					.levelCount = 1,
-					.baseArrayLayer = 0,
-					.layerCount = 1
-				},
-				.pNext = null,
-				.flags = 0 
-			};
+	for (self.swapChainImages.items, 0..) |image, n| {
+			const imageViewCreateInfo: c.VkImageViewCreateInfo = .{ .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = image, .viewType = c.VK_IMAGE_VIEW_TYPE_2D, .format = self.swapChainImageFormat, .components = .{ .r = c.VK_COMPONENT_SWIZZLE_IDENTITY, .g = c.VK_COMPONENT_SWIZZLE_IDENTITY, .b = c.VK_COMPONENT_SWIZZLE_IDENTITY, .a = c.VK_COMPONENT_SWIZZLE_IDENTITY }, .subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 }, .pNext = null, .flags = 0 };
 			try vkDie(c.vkCreateImageView(self.device, &imageViewCreateInfo, null, &self.swapChainImageViews.items[n]));
 		}
 	}
@@ -582,13 +365,13 @@ const HelloTriangleApplication = struct {
 		self.swapChainExtent = extent;
 	}
 	fn chooseSwapSurfaceFormat(availableFormats: []c.VkSurfaceFormatKHR) c.VkSurfaceFormatKHR {
-		for (availableFormats) |form| {
+	for (availableFormats) |form| {
 			if (form.format == c.VK_FORMAT_B8G8R8A8_SRGB and form.colorSpace == c.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) return form;
 		}
 		return availableFormats[0];
 	}
 	fn chooseSwapPresentMode(availablePresentModes: []c.VkPresentModeKHR) c.VkPresentModeKHR {
-		for (availablePresentModes) |mode| {
+	for (availablePresentModes) |mode| {
 			if (mode == c.VK_PRESENT_MODE_MAILBOX_KHR) return mode;
 		}
 		return c.VK_PRESENT_MODE_FIFO_KHR;
@@ -615,7 +398,7 @@ const HelloTriangleApplication = struct {
 		const queueFamilies = [_]u32{ indices.graphicsFamily.?, indices.presentFamily.? };
 		var queueCreateInfos = ArrayList(c.VkDeviceQueueCreateInfo).init(self.allocator);
 		defer queueCreateInfos.deinit();
-		for (queueFamilies, 0..) |fam, n| {
+	for (queueFamilies, 0..) |fam, n| {
 			var wasFound = false;
 			for (queueFamilies[0..n]) |famPrior| {
 				if (fam == famPrior) {
@@ -643,7 +426,7 @@ const HelloTriangleApplication = struct {
 
 		var indices: QueueFamilyIndices = .{};
 
-		for (queueFamilies, 0..) |fam, n| {
+	for (queueFamilies, 0..) |fam, n| {
 			if (indices.isComplete()) break;
 			if ((fam.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) > 0) {
 				indices.graphicsFamily = @intCast(u32, n);
@@ -660,7 +443,7 @@ const HelloTriangleApplication = struct {
 		var availableExtensions = try self.allocator.alloc(c.VkExtensionProperties, extensionCount);
 		defer self.allocator.free(availableExtensions);
 		try vkDie(c.vkEnumerateDeviceExtensionProperties(device, null, &extensionCount, availableExtensions.ptr));
-		for (deviceExtensions) |targetExt| {
+	for (deviceExtensions) |targetExt| {
 			var found = false;
 			for (availableExtensions) |realExt| {
 				if (std.cstr.cmp(@ptrCast([*:0]const u8, &realExt.extensionName), targetExt) == 0) {
@@ -691,7 +474,7 @@ const HelloTriangleApplication = struct {
 		defer self.allocator.free(devices);
 		try vkDie(c.vkEnumeratePhysicalDevices(self.instance, &deviceCount, devices.ptr));
 		var device: ?c.VkPhysicalDevice = null;
-		for (devices) |d| {
+	for (devices) |d| {
 			if (try self.isDeviceSuitable(d)) {
 				device = d;
 				break;
@@ -713,7 +496,7 @@ const HelloTriangleApplication = struct {
 		var layers = try self.allocator.alloc(c.VkLayerProperties, count);
 		defer self.allocator.free(layers);
 		try vkDie(c.vkEnumerateInstanceLayerProperties(&count, layers.ptr));
-		for (validationLayers) |neededName| {
+	for (validationLayers) |neededName| {
 			var layerFound = false;
 			for (layers) |layer| {
 				if (std.cstr.cmp(neededName, @ptrCast([*:0]const u8, &layer.layerName)) == 0) {
@@ -752,10 +535,17 @@ const HelloTriangleApplication = struct {
 	}
 	fn drawFrame(self: *Self) !void {
 		try vkDie(c.vkWaitForFences(self.device, 1, &self.inFlightFences[self.currentFrame], c.VK_TRUE, std.math.maxInt(u64)));
-		try vkDie(c.vkResetFences(self.device, 1, &self.inFlightFences[self.currentFrame]));
 
 		var imageIndex: u32 = undefined;
-		try vkDie(c.vkAcquireNextImageKHR(self.device, self.swapChain, std.math.maxInt(u64), self.imageAvailableSemaphores[self.currentFrame], null, &imageIndex));
+		{
+			const result = c.vkAcquireNextImageKHR(self.device, self.swapChain, std.math.maxInt(u64), self.imageAvailableSemaphores[self.currentFrame], null, &imageIndex);
+			switch (result) {
+				c.VK_ERROR_OUT_OF_DATE_KHR, => { try self.recreateSwapChain(); return; },
+				c.VK_SUCCESS, c.VK_SUBOPTIMAL_KHR => {},
+				else => return vkDie(result)
+			}
+		}
+		try vkDie(c.vkResetFences(self.device, 1, &self.inFlightFences[self.currentFrame]));
 
 		try vkDie(c.vkResetCommandBuffer(self.commandBuffers[self.currentFrame], 0));
 
@@ -775,20 +565,17 @@ const HelloTriangleApplication = struct {
 
 		try vkDie(c.vkQueueSubmit(self.graphicsQueue, 1, &submitInfo, self.inFlightFences[self.currentFrame]));
 
-		const presentInfo: c.VkPresentInfoKHR = .{
-			.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = &self.renderFinishedSemaphores[self.currentFrame],
-			.swapchainCount = 1,
-			.pSwapchains = &self.swapChain,
-			.pImageIndices = &imageIndex,
-			.pResults = null,
-			.pNext = null
-		};
+		const presentInfo: c.VkPresentInfoKHR = .{ .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &self.renderFinishedSemaphores[self.currentFrame], .swapchainCount = 1, .pSwapchains = &self.swapChain, .pImageIndices = &imageIndex, .pResults = null, .pNext = null };
 
-		try vkDie(c.vkQueuePresentKHR(self.presentQueue, &presentInfo));
-
-
+		{
+			const result = c.vkQueuePresentKHR(self.presentQueue, &presentInfo);
+			if (self.frameResized) { self.frameResized = false; try self.recreateSwapChain(); return;}
+			switch (result) {
+				c.VK_ERROR_OUT_OF_DATE_KHR => { self.frameResized = false; try self.recreateSwapChain(); return; },
+				c.VK_SUCCESS, c.VK_SUBOPTIMAL_KHR => {},
+				else => return vkDie(result)
+			}
+		}
 		self.currentFrame = (self.currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 	}
 	fn mainLoop(self: *Self) !void {
@@ -800,25 +587,19 @@ const HelloTriangleApplication = struct {
 		try vkDie(c.vkDeviceWaitIdle(self.device));
 	}
 	fn cleanup(self: *Self) !void {
-		for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-			c.vkDestroySemaphore(self.device,  self.imageAvailableSemaphores[i], null);
-			c.vkDestroySemaphore(self.device,  self.renderFinishedSemaphores[i], null);
+	for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+			c.vkDestroySemaphore(self.device, self.imageAvailableSemaphores[i], null);
+			c.vkDestroySemaphore(self.device, self.renderFinishedSemaphores[i], null);
 			c.vkDestroyFence(self.device, self.inFlightFences[i], null);
 		}
 		c.vkDestroyCommandPool(self.device, self.commandPool, null);
-		for (self.swapChainFramebuffers.items) |framebuffer| {
-			c.vkDestroyFramebuffer(self.device, framebuffer, null);
-		}
+		self.cleanupSwapChain();
+		self.swapChainImages.deinit();
+		self.swapChainImageViews.deinit();
 		self.swapChainFramebuffers.deinit();
 		c.vkDestroyPipeline(self.device, self.graphicsPipeline, null);
 		c.vkDestroyPipelineLayout(self.device, self.pipelineLayout, null);
 		c.vkDestroyRenderPass(self.device, self.renderPass, null);
-		for (self.swapChainImageViews.items) |imageView| {
-			c.vkDestroyImageView(self.device, imageView, null);
-		}
-		self.swapChainImageViews.deinit();
-		self.swapChainImages.deinit();
-		c.vkDestroySwapchainKHR(self.device, self.swapChain, null);
 		c.vkDestroyDevice(self.device, null);
 		DestroyDebugUtilsMessengerEXT(self.instance, self.debugMessenger, null);
 		c.vkDestroySurfaceKHR(self.instance, self.surface, null);
