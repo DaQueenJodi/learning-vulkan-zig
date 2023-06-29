@@ -844,7 +844,7 @@ const HelloTriangleApplication = struct {
         c.vkCmdSetScissor(commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
 
         c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipelineLayout, 0, 1, &self.descriptorSets[self.currentFrame], 0, null);
-        for (0..3) |i| {
+        for (0..6) |i| {
             c.vkCmdPushConstants(commandBuffer, self.pipelineLayout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(i32), &@as(i32, @intCast(i)));
             c.vkCmdDrawIndexed(commandBuffer, 3, 1, @intCast(3*i), 0, 0);
         }
@@ -910,15 +910,18 @@ const HelloTriangleApplication = struct {
             .format = try self.findDepthFormat(),
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
             .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
             .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
             .finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             .flags = 0
         };
 
-        const depthAttachmentRef: c.VkAttachmentReference = .{ .attachment = 1, .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        const depthAttachmentRef: c.VkAttachmentReference = .{
+            .attachment = 1,
+            .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL 
+        };
 
         const subpassDescription: c.VkSubpassDescription = .{
             .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -936,22 +939,35 @@ const HelloTriangleApplication = struct {
         const subpassDependency: c.VkSubpassDependency = .{
             .srcSubpass = c.VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
-            .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             .srcAccessMask = 0,
-            .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-            .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             .dependencyFlags = 0,
         };
 
+        const depthDependency: c.VkSubpassDependency = .{
+            .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+            .dstSubpass = 0,
+            .srcStageMask = c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            .srcAccessMask = 0,
+            .dstStageMask = c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            .dstAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dependencyFlags = 0
+        };
+        _ = depthDependency;
+
         const renderPassCreateInfo: c.VkRenderPassCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+            .pNext = null,
             .attachmentCount = 2,
             .pAttachments = &[_]c.VkAttachmentDescription{colorAttachmentDescription, depthAttachmentDescription},
             .subpassCount = 1,
             .pSubpasses = &subpassDescription,
             .dependencyCount = 1,
             .pDependencies = &subpassDependency,
-            .pNext = null,
             .flags = 0 
         };
 
@@ -1122,7 +1138,7 @@ const HelloTriangleApplication = struct {
             .flags = 0,
             .depthTestEnable = c.VK_TRUE,
             .depthWriteEnable = c.VK_TRUE,
-            .depthCompareOp = c.VK_COMPARE_OP_LESS,
+            .depthCompareOp = c.VK_COMPARE_OP_ALWAYS,
             .depthBoundsTestEnable = c.VK_FALSE,
             .stencilTestEnable = c.VK_FALSE,
             .minDepthBounds = 0.0,
@@ -1406,11 +1422,10 @@ const HelloTriangleApplication = struct {
     }
     fn updateUniformBuffer(self: *Self, currentImage: u32) !void {
         const time: f32 = @floatCast(c.glfwGetTime());
-        _ = time;
-        const rotation = 1 * std.math.degreesToRadians(f32, 90.0);
+        const rotation = time * std.math.degreesToRadians(f32, 90.0);
         _ = rotation;
         
-        const model = zm.identity();//zm.translation(10, 20, 30); //: zm.Mat = zm.matFromAxisAngle(zm.f32x4(0.0, 0.0, 1.0, 0.0), rotation);
+        const model = zm.identity();//zm.rotationZ(rotation);//zm.translation(10, 20, 30); //: zm.Mat = zm.matFromAxisAngle(zm.f32x4(0.0, 0.0, 1.0, 0.0), rotation);
         const view: zm.Mat = zm.lookAtLh(zm.f32x4(2.0, 2.0, 2.0, 0.0), zm.f32x4(0.0, 0.0, 0.0, 0.0), zm.f32x4(0.0, 0.0, 1.0, 0.0));
         const proj: zm.Mat = zm.perspectiveFovLh(std.math.degreesToRadians(f32, 45.0), @as(f32, @floatFromInt(self.swapChainExtent.width)) / @as(f32, @floatFromInt(self.swapChainExtent.height)), 0.1, 10.0);
 
