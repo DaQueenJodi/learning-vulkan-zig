@@ -4,8 +4,8 @@ let
     (pkgs.stdenv.mkDerivation rec {
       name = "zig";
       src = pkgs.fetchurl {
-        url = "https://ziglang.org/builds/zig-linux-x86_64-0.11.0-dev.3737+9eb008717.tar.xz";
-        sha256 = "5ddVAvpM56H7k2GbJbxTKUBUN1E47Nc9XdokKuKuEE0=";
+        url = "https://ziglang.org/builds/zig-linux-x86_64-0.11.0-dev.3859+88284c124.tar.xz";
+        sha256 = "6Uj9l5/97bxArsOHzdvJsL1Xjf0sb3e6R4N5uaKWSV0=";
       };
       installPhase = ''
         mkdir -p $out/bin
@@ -25,6 +25,7 @@ in
 			vulkan-loader
 			shaderc
 			spirv-tools
+			cglm
 		];
 		VK_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
 	}
