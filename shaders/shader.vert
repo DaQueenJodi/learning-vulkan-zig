@@ -18,13 +18,11 @@ layout(push_constant) uniform constants {
 } index;
 
 void main() {
-	gl_Position = ubo.proj * ubo.view * ubo.model * vec4(inPosition, 1.0);
-	int idx = index.triangleIndex;
-	if (idx == 0) { fragColor = vec3(1, 0, 0); }
-	else if (idx == 1) { fragColor = vec3(0, 1, 0); }
-	else if (idx == 2) { fragColor = vec3(0, 0, 1); }
-	else if (idx == 3) { fragColor = vec3(1, 1, 0); }
-	else if (idx == 4) { fragColor = vec3(1, 0, 1); }
-
+	const mat4 mvp = ubo.proj * ubo.view * ubo.model;
+	gl_Position = mvp * vec4(inPosition, 1.0);
+	const vec3 purple = vec3(0.5, 0.0, 1.0);
+	const vec3 aqua = vec3(0.0, 0.5, 1.0);
+	const float z = inPosition.z;
+	fragColor = mix(purple, aqua, z);
 	fragTexCoord = inTexCoord;
 }
