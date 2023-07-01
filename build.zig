@@ -80,7 +80,6 @@ pub fn build(b: *std.Build) void {
     zmath_pkg.link(exe);
 
     exe.addCSourceFile("deps/c/stb_image_impl.c", &[_][]u8{});
-    exe.addCSourceFile("deps/c/tinyobj_loader_impl.c", &[_][]u8{});
     exe.addIncludePath("deps/c");
 
     // This declares intent for the executable to be installed into the
