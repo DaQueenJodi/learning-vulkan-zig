@@ -2,8 +2,6 @@ pub usingnamespace @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", "");
     @cInclude("GLFW/glfw3.h");
 
-    @cInclude("tinyobj_loader_c.h");
-
     @cInclude("stb_image.h");
 
     @cUndef("__SSE2__");

@@ -150,6 +150,12 @@ const UniformBufferObject = struct {
     proj: c.mat4
 };
 
+const MandelPushConstant = struct {
+    time: f32,
+    height: u32,
+    width: u32
+};
+
 
 const HelloTriangleApplication = struct {
     window: *c.GLFWwindow,
@@ -274,37 +280,27 @@ const HelloTriangleApplication = struct {
 
     }
     fn loadModel(self: *Self) !void {
-        var objData = try obj.ObjData.init(self.allocator, MODEL_PATH);
-        defer objData.deinit();
 
-        const verticies = objData.verticies.items;
-        const textureCoords = objData.textureCoords.items;
-        const triangles = objData.triangles.items;
-        self.verticies = ArrayList(Vertex).init(self.allocator);
-        self.indices =  try ArrayList(u32).initCapacity(
-            self.allocator, @intCast(triangles.len * 3)
-        );
+        
+        const verticies = [_]c.vec3{
+            .{ -1.0, -1.0, 0.0 },
+            .{  1.0,  1.0, 0.0 },
+            .{ -1.0,  1.0, 0.0 },
+            .{  1.0, -1.0, 0.0 }
+        };
 
-        for (triangles) |triangle| {
-            for (triangle[0..3]) |point| {
-                var vertex: Vertex = undefined;
-                const pos = verticies[point.index];
-                vertex.pos = .{ pos.x, pos.y, pos.z };
-                const coord = textureCoords[point.textureIndex];
-                vertex.texCoord = .{ coord.u, 1.0 - coord.v };
-                vertex.color = .{ 1.0, 1.0, 1.0};
-                var found: ?usize = null;
-                for (self.verticies.items, 0..) |e, i| {
-                    if (std.meta.eql(vertex, e)) { found = i; break; }
-                }
-                if (found == null) {
-                    try self.verticies.append(vertex);
-                }
-                try self.indices.append(
-                    @intCast(found orelse (self.verticies.items.len - 1))
-                );
-            }
+        const indices = [_]u32 {
+            0, 1, 2,
+            0, 3, 1
+        };
+
+        self.verticies = try ArrayList(Vertex).initCapacity(self.allocator, verticies.len);
+        self.indices = try ArrayList(u32).initCapacity(self.allocator, indices.len);
+        for (verticies[0..]) |vert| {
+            const vertex = Vertex{ .texCoord = .{0.0, 0.0}, .color = .{0.0, 0.0, 0.0}, .pos = vert};
+            try self.verticies.append(vertex);
         }
+        try self.indices.appendSlice(indices[0..]);
     }
     fn findSupportedFormat(self: *Self, candidates: []c.VkFormat, tiling: c.VkImageTiling, features: c.VkFormatFeatureFlags) !c.VkFormat {
         for (candidates) |format| {
@@ -912,6 +908,20 @@ const HelloTriangleApplication = struct {
         c.vkCmdSetScissor(commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
 
         c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipelineLayout, 0, 1, &self.descriptorSets[self.currentFrame], 0, null);
+        c.vkCmdPushConstants(
+            commandBuffer,
+            self.pipelineLayout,
+            c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            @sizeOf(MandelPushConstant),
+            @ptrCast(
+                &MandelPushConstant{
+                    .height = self.swapChainExtent.height,
+                    .width = self.swapChainExtent.width,
+                    .time = @floatCast(c.glfwGetTime())
+                }
+            )
+        );
         c.vkCmdDrawIndexed(commandBuffer, @intCast(self.indices.items.len), 1, 0, 0, 0);
         c.vkCmdEndRenderPass(commandBuffer);
         try vkDie(c.vkEndCommandBuffer(commandBuffer));
@@ -1050,10 +1060,10 @@ const HelloTriangleApplication = struct {
         return shaderModule;
     }
     fn createGraphicsPipeline(self: *Self) !void {
-        const vertShaderCode = try helper.readFile(self.allocator, "shaders/shader.vert.spv");
+        const vertShaderCode = try helper.readFile(self.allocator, "shaders/mandelbrot.vert.spv");
         defer self.allocator.free(vertShaderCode);
 
-        const fragShaderCode = try helper.readFile(self.allocator, "shaders/shader.frag.spv");
+        const fragShaderCode = try helper.readFile(self.allocator, "shaders/mandelbrot.frag.spv");
         defer self.allocator.free(fragShaderCode);
 
         const vertShaderModule = try self.createShaderModule(vertShaderCode);
@@ -1177,13 +1187,18 @@ const HelloTriangleApplication = struct {
             .flags = 0 
         };
 
+        const pushConstant: c.VkPushConstantRange = .{
+            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = @sizeOf(MandelPushConstant)
+        };
 
         const pipelineLayoutCreateInfo: c.VkPipelineLayoutCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
             .pSetLayouts = &self.descriptorSetLayout,
-            .pushConstantRangeCount = 0,
-            .pPushConstantRanges = null,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstant,
             .pNext = null,
             .flags = 0
         };
@@ -1419,14 +1434,22 @@ const HelloTriangleApplication = struct {
         var devices = try self.allocator.alloc(c.VkPhysicalDevice, deviceCount);
         defer self.allocator.free(devices);
         try vkDie(c.vkEnumeratePhysicalDevices(self.instance, &deviceCount, devices.ptr));
-        var device: ?c.VkPhysicalDevice = null;
+        var suitableDevices = ArrayList(c.VkPhysicalDevice).init(self.allocator);
+        defer suitableDevices.deinit();
+
         for (devices) |d| {
-            if (try self.isDeviceSuitable(d)) {
-                device = d;
-                break;
+            if (try self.isDeviceSuitable(d)) try suitableDevices.append(d);
+        }
+        for (suitableDevices.items) |d| {
+            var properties: c.VkPhysicalDeviceProperties = undefined;
+            c.vkGetPhysicalDeviceProperties(d, &properties);
+            if (properties.deviceType == c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                self.physicalDevice = d;
+                return;
             }
         }
-        self.physicalDevice = device orelse return error.FailedToFindSuitableGPU;
+        self.physicalDevice = suitableDevices.getLastOrNull() orelse
+            return error.FailedToFindSuitableGPU;
     }
     fn setupDebugMessenger(self: *Self) !void {
         const createInfo: c.VkDebugUtilsMessengerCreateInfoEXT = .{ .sType = c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT, .messageSeverity = c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
