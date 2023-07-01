@@ -1,5 +1,6 @@
 const std = @import("std");
 const helper = @import("helper.zig");
+const obj = @import("obj.zig");
 const ArrayList = std.ArrayList;
 const c = @import("c.zig");
 const Allocator = std.mem.Allocator;
@@ -8,6 +9,11 @@ const Allocator = std.mem.Allocator;
 const MAX_FRAMES_IN_FLIGHT = 2;
 const SCREEN_W = 800;
 const SCREEN_H = 600;
+
+const MODEL_PATH = "models/viking_room.obj";
+const TEXTURE_PATH = "textures/viking_room.png";
+
+
 const validationLayers = [_][*c]const u8{
     "VK_LAYER_KHRONOS_validation"
 };
@@ -137,28 +143,13 @@ const Vertex = struct {
     }
 };
 
-const verticies = [_]Vertex{
-    .{ .pos = .{  1.0,  1.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0 }, .texCoord = .{ 1.0, 1.0 } },
-    .{ .pos = .{ -1.0,  1.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0 }, .texCoord = .{ 1.0, 0.0 } },
-    .{ .pos = .{  1.0, -1.0, 0.0 }, .color = .{ 0.0, 0.0, 1.0 }, .texCoord = .{ 0.0, 0.0 } },
-    .{ .pos = .{ -1.0, -1.0, 0.0 }, .color = .{ 0.0, 0.0, 1.0 }, .texCoord = .{ 0.0, 0.0 } },
-    .{ .pos = .{  0.0,  0.0, 1.0 }, .color = .{ 0.0, 0.0, 1.0 }, .texCoord = .{ 0.0, 0.0 } },
-};
-
-const indices = [_]u16{
-    0, 1, 3, // bottom left triangle
-    0, 2, 3, // bottom right triangle
-    0, 4, 1, // left triangle
-    1, 4, 3, // bottom triangle
-    2, 4, 3, // right triangle
-    0, 4, 2  // top triangle
-};
 
 const UniformBufferObject = struct {
     model: c.mat4,
     view: c.mat4,
-    proj: c.mat4,
+    proj: c.mat4
 };
+
 
 const HelloTriangleApplication = struct {
     window: *c.GLFWwindow,
@@ -202,8 +193,11 @@ const HelloTriangleApplication = struct {
     depthImage: c.VkImage,
     depthImageMemory: c.VkDeviceMemory,
     depthImageView: c.VkImageView,
+    verticies: ArrayList(Vertex),
+    indices: ArrayList(u32),
     allocator: Allocator,
     const Self = @This();
+
     pub fn init(allocator: Allocator) Self {
         var self: Self = undefined;
         self.allocator = allocator;
@@ -247,12 +241,70 @@ const HelloTriangleApplication = struct {
         try self.createTextureImageView();
         try self.createTextureSampler();
         try self.createCommandBuffers();
+        try self.loadModel();
         try self.createVertexBuffer();
         try self.createIndexBuffer();
         try self.createUniformBuffers();
         try self.createDescriptorPool();
         try self.createDescriptorSets();
         try self.createSyncObjects();
+    }
+
+    fn objFileReadCallback(ctx: ?*anyopaque, fileName: [*c]const u8, isMtl: c_int, _: [*c]const u8, data: [*c][*c]u8, len: [*c]usize) callconv(.C) void {
+        if (isMtl == 1) {
+            data.* = null;
+            len.* = 0;
+            return;
+        }
+        const allocator: *Allocator = @ptrCast(@alignCast(ctx.?));
+        std.debug.print("file name: {s}\n", .{fileName});
+        var file = std.fs.cwd().openFile(std.mem.span(fileName), .{}) catch @panic("failed to open obj file");
+        defer file.close();
+        const stat = file.stat() catch @panic("failed to stat obj file");
+        const size = stat.size;
+
+        len.* = size;
+
+        var buffer = allocator.alloc(u8, size) catch @panic("failed to allocate obj buffer");
+
+        const read = file.readAll(buffer) catch @panic("failed to read obj file");
+        std.debug.assert(read == size);
+
+        data.* = buffer.ptr;
+
+    }
+    fn loadModel(self: *Self) !void {
+        var objData = try obj.ObjData.init(self.allocator, MODEL_PATH);
+        defer objData.deinit();
+
+        const verticies = objData.verticies.items;
+        const textureCoords = objData.textureCoords.items;
+        const triangles = objData.triangles.items;
+        self.verticies = ArrayList(Vertex).init(self.allocator);
+        self.indices =  try ArrayList(u32).initCapacity(
+            self.allocator, @intCast(triangles.len * 3)
+        );
+
+        for (triangles) |triangle| {
+            for (triangle[0..3]) |point| {
+                var vertex: Vertex = undefined;
+                const pos = verticies[point.index];
+                vertex.pos = .{ pos.x, pos.y, pos.z };
+                const coord = textureCoords[point.textureIndex];
+                vertex.texCoord = .{ coord.u, 1.0 - coord.v };
+                vertex.color = .{ 1.0, 1.0, 1.0};
+                var found: ?usize = null;
+                for (self.verticies.items, 0..) |e, i| {
+                    if (std.meta.eql(vertex, e)) { found = i; break; }
+                }
+                if (found == null) {
+                    try self.verticies.append(vertex);
+                }
+                try self.indices.append(
+                    @intCast(found orelse (self.verticies.items.len - 1))
+                );
+            }
+        }
     }
     fn findSupportedFormat(self: *Self, candidates: []c.VkFormat, tiling: c.VkImageTiling, features: c.VkFormatFeatureFlags) !c.VkFormat {
         for (candidates) |format| {
@@ -437,7 +489,7 @@ const HelloTriangleApplication = struct {
         var h: i32 = undefined;
         var cs: i32 = undefined;
 
-        const pixels = c.stbi_load("textures/obama.png", &w, &h, &cs, c.STBI_rgb_alpha).?;
+        const pixels = c.stbi_load(TEXTURE_PATH, &w, &h, &cs, c.STBI_rgb_alpha).?;
         defer c.stbi_image_free(pixels);
 
         const size: u64 = @intCast(w * h * 4);
@@ -674,17 +726,17 @@ const HelloTriangleApplication = struct {
     }
     fn createIndexBuffer(self: *Self) !void {
 
-        var	stagingBuffer: c.VkBuffer = undefined;
+        var stagingBuffer: c.VkBuffer = undefined;
 
         var stagingBufferMemory: c.VkDeviceMemory = undefined;
 
-        const size = @sizeOf(@TypeOf(indices));
+        const size = (@sizeOf(u32) * self.indices.items.len);
 
         try self.createBuffer(size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &stagingBuffer, &stagingBufferMemory);
 
-        var data: [*]u16 = undefined;
+        var data: [*]u32 = undefined;
         try vkDie(c.vkMapMemory(self.device, stagingBufferMemory, 0, size, 0, @ptrCast(&data)));
-        @memcpy(data, &indices);
+        @memcpy(data, self.indices.items);
         c.vkUnmapMemory(self.device, stagingBufferMemory);
 
         try self.createBuffer(size, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.indexBuffer, &self.indexBufferMemory);
@@ -697,12 +749,12 @@ const HelloTriangleApplication = struct {
     fn createVertexBuffer(self: *Self) !void {
         var	stagingBuffer: c.VkBuffer = undefined;
         var stagingBufferMemory: c.VkDeviceMemory = undefined;
-        const size = @sizeOf(@TypeOf(verticies));
+        const size = @sizeOf(Vertex) * self.verticies.items.len;
         try self.createBuffer(size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &stagingBuffer, &stagingBufferMemory);
 
         var data: [*]Vertex = undefined;
         try vkDie(c.vkMapMemory(self.device, stagingBufferMemory, 0, size, 0, @ptrCast(&data)));
-        @memcpy(data, &verticies);
+        @memcpy(data, self.verticies.items);
         c.vkUnmapMemory(self.device, stagingBufferMemory);
         try self.createBuffer(size, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.vertexBuffer, &self.vertexBufferMemory);
         try self.copyBuffer(stagingBuffer, self.vertexBuffer, size);
@@ -765,6 +817,7 @@ const HelloTriangleApplication = struct {
 
         try self.createSwapChain();
         try self.createImageViews();
+
         try self.createDepthResources();
         try self.createFramebuffers();
     }
@@ -845,7 +898,7 @@ const HelloTriangleApplication = struct {
         c.vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, c.VK_SUBPASS_CONTENTS_INLINE);
         c.vkCmdBindPipeline(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphicsPipeline);
         c.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &self.vertexBuffer, &@as(u64, 0));
-        c.vkCmdBindIndexBuffer(commandBuffer, self.indexBuffer, 0, c.VK_INDEX_TYPE_UINT16);
+        c.vkCmdBindIndexBuffer(commandBuffer, self.indexBuffer, 0, c.VK_INDEX_TYPE_UINT32);
         const viewport: c.VkViewport = .{
             .x = 0.0,
             .y = 0.0,
@@ -859,10 +912,7 @@ const HelloTriangleApplication = struct {
         c.vkCmdSetScissor(commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
 
         c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipelineLayout, 0, 1, &self.descriptorSets[self.currentFrame], 0, null);
-        for (0..6) |i| {
-            c.vkCmdPushConstants(commandBuffer, self.pipelineLayout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(i32), &@as(i32, @intCast(i)));
-            c.vkCmdDrawIndexed(commandBuffer, 3, 1, @intCast(3*i), 0, 0);
-        }
+        c.vkCmdDrawIndexed(commandBuffer, @intCast(self.indices.items.len), 1, 0, 0, 0);
         c.vkCmdEndRenderPass(commandBuffer);
         try vkDie(c.vkEndCommandBuffer(commandBuffer));
     }
@@ -1127,18 +1177,13 @@ const HelloTriangleApplication = struct {
             .flags = 0 
         };
 
-        const pushConstants: c.VkPushConstantRange = .{
-            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
-            .offset = 0,
-            .size = @sizeOf(i32)
-        };
 
         const pipelineLayoutCreateInfo: c.VkPipelineLayoutCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
             .pSetLayouts = &self.descriptorSetLayout,
-            .pushConstantRangeCount = 1,
-            .pPushConstantRanges = &pushConstants,
+            .pushConstantRangeCount = 0,
+            .pPushConstantRanges = null,
             .pNext = null,
             .flags = 0
         };
@@ -1453,7 +1498,7 @@ const HelloTriangleApplication = struct {
         var axis = [_]f32{0.0, 0.0, 1.0};
         c.glm_mat4_identity(&ubo.model);
         c.glm_rotate(&ubo.model, rotation, axis[0..].ptr);
-        var eye = [_]f32{3.0, 3.0, 3.0};
+        var eye = [_]f32{2.0, 2.0, 2.0};
         var center = [_]f32{0.0, 0.0, 0.0};
         var up = [_]f32{0.0, 0.0, 1.0};
         c.glm_lookat(eye[0..].ptr, center[0..].ptr, up[0..].ptr, &ubo.view);
@@ -1529,6 +1574,11 @@ const HelloTriangleApplication = struct {
         try vkDie(c.vkDeviceWaitIdle(self.device));
     }
     fn cleanup(self: *Self) !void {
+
+        self.verticies.deinit();
+        self.indices.deinit();
+
+
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
             c.vkDestroySemaphore(self.device, self.imageAvailableSemaphores[i], null);
             c.vkDestroySemaphore(self.device, self.renderFinishedSemaphores[i], null);
@@ -1587,15 +1637,6 @@ const HelloTriangleApplication = struct {
     }
 };
 
-fn print_matrix(m: c.mat4) void {
-    for (0..4) |i| {
-        for (0..4) |j| {
-            std.debug.print("{d:.6} ", .{m[i][j]});
-        }
-        std.debug.print("\n", .{});
-    }
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
@@ -1605,4 +1646,5 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     var app = HelloTriangleApplication.init(allocator);
     try app.run();
+    errdefer app.cleanup();
 }

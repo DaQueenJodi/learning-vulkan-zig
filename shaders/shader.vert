@@ -13,16 +13,8 @@ layout(location = 2) in vec2 inTexCoord;
 layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec2 fragTexCoord;
 
-layout(push_constant) uniform constants {
-	int triangleIndex;
-} index;
-
 void main() {
 	const mat4 mvp = ubo.proj * ubo.view * ubo.model;
 	gl_Position = mvp * vec4(inPosition, 1.0);
-	const vec3 purple = vec3(0.5, 0.0, 1.0);
-	const vec3 aqua = vec3(0.0, 0.5, 1.0);
-	const float z = inPosition.z;
-	fragColor = mix(purple, aqua, z);
 	fragTexCoord = inTexCoord;
 }
