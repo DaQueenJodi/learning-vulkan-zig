@@ -186,6 +186,7 @@ const HelloTriangleApplication = struct {
     uniformBuffersMapped: [MAX_FRAMES_IN_FLIGHT]*UniformBufferObject,
     descriptorPool: c.VkDescriptorPool,
     descriptorSets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet,
+    mipLevels: u32,
     textureImage: c.VkImage,
     textureImageMemory: c.VkDeviceMemory,
     textureImageView: c.VkImageView,
@@ -195,6 +196,10 @@ const HelloTriangleApplication = struct {
     depthImageView: c.VkImageView,
     verticies: ArrayList(Vertex),
     indices: ArrayList(u32),
+    msaaSamples: c.VkSampleCountFlagBits,
+    colorImage: c.VkImage,
+    colorImageMemory: c.VkDeviceMemory,
+    colorImageView: c.VkImageView,
     allocator: Allocator,
     const Self = @This();
 
@@ -236,6 +241,7 @@ const HelloTriangleApplication = struct {
         try self.createGraphicsPipeline();
         try self.createCommandPool();
         try self.createDepthResources();
+        try self.createColorResource();
         try self.createFramebuffers();
         try self.createTextureImage();
         try self.createTextureImageView();
@@ -249,29 +255,32 @@ const HelloTriangleApplication = struct {
         try self.createDescriptorSets();
         try self.createSyncObjects();
     }
+    fn createColorResource(self: *Self) !void {
+        const colorFormat = self.swapChainImageFormat;
+        try self.createImage(self.swapChainExtent.width, self.swapChainExtent.height, 1, self.msaaSamples, colorFormat, c.VK_IMAGE_TILING_OPTIMAL,
+            c.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &self.colorImage, &self.colorImageMemory);
+        self.colorImageView = try self.createImageView(self.colorImage, colorFormat, c.VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    }
+    fn getMaxUsableSampleCount(self: *Self) c.VkSampleCountFlagBits {
+        var properties: c.VkPhysicalDeviceProperties = undefined;
+        c.vkGetPhysicalDeviceProperties(self.physicalDevice, &properties);
 
-    fn objFileReadCallback(ctx: ?*anyopaque, fileName: [*c]const u8, isMtl: c_int, _: [*c]const u8, data: [*c][*c]u8, len: [*c]usize) callconv(.C) void {
-        if (isMtl == 1) {
-            data.* = null;
-            len.* = 0;
-            return;
+
+        const availableCounts = [_]c.VkSampleCountFlagBits{
+            c.VK_SAMPLE_COUNT_64_BIT,
+            c.VK_SAMPLE_COUNT_32_BIT,
+            c.VK_SAMPLE_COUNT_16_BIT,
+            c.VK_SAMPLE_COUNT_8_BIT,
+            c.VK_SAMPLE_COUNT_4_BIT,
+            c.VK_SAMPLE_COUNT_2_BIT,
+            c.VK_SAMPLE_COUNT_1_BIT,
+        };
+        const counts = properties.limits.framebufferColorSampleCounts & properties.limits.framebufferDepthSampleCounts;
+        for (availableCounts) |count| {
+            if ((counts & count) > 0) return count;
         }
-        const allocator: *Allocator = @ptrCast(@alignCast(ctx.?));
-        std.debug.print("file name: {s}\n", .{fileName});
-        var file = std.fs.cwd().openFile(std.mem.span(fileName), .{}) catch @panic("failed to open obj file");
-        defer file.close();
-        const stat = file.stat() catch @panic("failed to stat obj file");
-        const size = stat.size;
-
-        len.* = size;
-
-        var buffer = allocator.alloc(u8, size) catch @panic("failed to allocate obj buffer");
-
-        const read = file.readAll(buffer) catch @panic("failed to read obj file");
-        std.debug.assert(read == size);
-
-        data.* = buffer.ptr;
-
+        unreachable;
     }
     fn loadModel(self: *Self) !void {
         var objData = try obj.ObjData.init(self.allocator, MODEL_PATH);
@@ -340,17 +349,19 @@ const HelloTriangleApplication = struct {
         try self.createImage(
             self.swapChainExtent.width,
             self.swapChainExtent.height,
+            1,
+            self.msaaSamples,
             format,
             c.VK_IMAGE_TILING_OPTIMAL,
             c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
             c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             &self.depthImage,
-            &self.depthImageMemory
+            &self.depthImageMemory,
         );
 
-        self.depthImageView = try self.createImageView(self.depthImage, format, c.VK_IMAGE_ASPECT_DEPTH_BIT);
+        self.depthImageView = try self.createImageView(self.depthImage, format, c.VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 
-        try self.transitionImageLayout(self.depthImage, format, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        try self.transitionImageLayout(self.depthImage, format, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 1);
 
     }
     fn createTextureSampler(self: *Self) !void {
@@ -375,15 +386,15 @@ const HelloTriangleApplication = struct {
             .mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR,
             .mipLodBias = 0.0,
             .minLod = 0.0,
-            .maxLod = 0.0,
+            .maxLod = @floatFromInt(self.mipLevels)
         };
 
         try vkDie(c.vkCreateSampler(self.device, &samplerCreateInfo, null, &self.textureSampler));
     }
     fn createTextureImageView(self: *Self) !void {
-        self.textureImageView = try self.createImageView(self.textureImage, c.VK_FORMAT_R8G8B8A8_SRGB, c.VK_IMAGE_ASPECT_COLOR_BIT);
+        self.textureImageView = try self.createImageView(self.textureImage, c.VK_FORMAT_R8G8B8A8_SRGB, c.VK_IMAGE_ASPECT_COLOR_BIT, self.mipLevels);
     }
-    fn createImageView(self: *Self, image: c.VkImage, format: c.VkFormat, aspectFlags: c.VkImageAspectFlags) !c.VkImageView {
+    fn createImageView(self: *Self, image: c.VkImage, format: c.VkFormat, aspectFlags: c.VkImageAspectFlags, mipLevels: u32) !c.VkImageView {
         const viewCreateInfo: c.VkImageViewCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
             .pNext = null,
@@ -392,13 +403,13 @@ const HelloTriangleApplication = struct {
             .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
             .format = format,
             .components = .{ .r = c.VK_COMPONENT_SWIZZLE_IDENTITY, .g = c.VK_COMPONENT_SWIZZLE_IDENTITY, .b = c.VK_COMPONENT_SWIZZLE_IDENTITY, .a = c.VK_COMPONENT_SWIZZLE_IDENTITY },
-            .subresourceRange = .{ .aspectMask = aspectFlags, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 },
+            .subresourceRange = .{ .aspectMask = aspectFlags, .baseMipLevel = 0, .levelCount = mipLevels, .baseArrayLayer = 0, .layerCount = 1 },
         };
         var imageView: c.VkImageView = undefined;
         try vkDie(c.vkCreateImageView(self.device, &viewCreateInfo, null, &imageView));
         return imageView;
     }
-    fn transitionImageLayout(self: *Self, image: c.VkImage, format: c.VkFormat, oldLayout: c.VkImageLayout, newLayout: c.VkImageLayout) !void {
+    fn transitionImageLayout(self: *Self, image: c.VkImage, format: c.VkFormat, oldLayout: c.VkImageLayout, newLayout: c.VkImageLayout, mipLevels: u32) !void {
         const commandBuffer = try self.beginSingleTimeCommands();
 
         var barrier: c.VkImageMemoryBarrier = .{
@@ -413,7 +424,7 @@ const HelloTriangleApplication = struct {
                 // defined later
                 .aspectMask = undefined,
                 .baseMipLevel = 0,
-                .levelCount = 1,
+                .levelCount = mipLevels,
                 .baseArrayLayer = 0,
                 .layerCount = 1
             },
@@ -484,6 +495,106 @@ const HelloTriangleApplication = struct {
 
         try self.endSingleTimeCommands(commandBuffer);
     }
+    fn generateMipmaps(self: *Self, image: c.VkImage, imageFormat: c.VkFormat,  width: u32, height: u32, mipLevels: u32) !void {
+
+        var formatProperties: c.VkFormatProperties = undefined;
+        c.vkGetPhysicalDeviceFormatProperties(self.physicalDevice, imageFormat, &formatProperties);
+        if ((formatProperties.optimalTilingFeatures & c.VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) < 1) return error.ImageFormatDoesntSupportLinearBlitting;
+
+        var mipWidth = width;
+        var mipHeight = height;
+
+        const commandBuffer = try self.beginSingleTimeCommands();
+
+        var barrier: c.VkImageMemoryBarrier = .{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = null,
+            // defined later
+            .oldLayout = undefined,
+            .newLayout = undefined,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .subresourceRange = .{
+                .baseMipLevel = undefined,
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+                .levelCount = 1 
+            },
+            .srcAccessMask = 0,
+            .dstAccessMask = 0,
+            .image = image
+        };
+
+        for (1..mipLevels) |i| {
+            barrier.subresourceRange.baseMipLevel = @intCast(i - 1);
+            barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
+
+            c.vkCmdPipelineBarrier(commandBuffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                0, null,
+                0, null,
+                1, &barrier);
+
+            const blit: c.VkImageBlit = .{
+                .srcOffsets = .{ 
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = @intCast(mipWidth), .y = @intCast(mipHeight), .z = 1 },
+                },
+                .dstOffsets =.{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{
+                        .x = @intCast(if (mipWidth > 1) mipWidth / 2 else 1),
+                        .y = @intCast(if (mipHeight > 1) mipHeight / 2 else 1),
+                        .z = 1
+                    }
+                },
+                .srcSubresource = .{
+                    .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = @intCast(i - 1),
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+                .dstSubresource = .{
+                    .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = @intCast(i),
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                },
+            };
+            c.vkCmdBlitImage(commandBuffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, c.VK_FILTER_LINEAR);
+
+            barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+            c.vkCmdPipelineBarrier(commandBuffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 
+                0, null,
+                0, null,
+                1, &barrier);
+
+            if (mipWidth > 1) mipWidth /= 2;
+            if (mipHeight > 1) mipHeight /= 2;
+        }
+
+        barrier.subresourceRange.baseMipLevel = self.mipLevels - 1;
+        barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+
+        c.vkCmdPipelineBarrier(commandBuffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, null,
+            0, null,
+            1, &barrier);
+
+        try self.endSingleTimeCommands(commandBuffer);
+
+    }
     fn createTextureImage(self: *Self) !void {
         var w: i32 = undefined;
         var h: i32 = undefined;
@@ -491,6 +602,10 @@ const HelloTriangleApplication = struct {
 
         const pixels = c.stbi_load(TEXTURE_PATH, &w, &h, &cs, c.STBI_rgb_alpha).?;
         defer c.stbi_image_free(pixels);
+
+        const math = std.math;
+        const biggestSize: f32 = @floatFromInt(@max(w, h));
+        self.mipLevels = @intFromFloat(math.floor( math.log2(biggestSize)) + 1);
 
         const size: u64 = @intCast(w * h * 4);
 
@@ -507,9 +622,13 @@ const HelloTriangleApplication = struct {
         try self.createImage(
             @intCast(w),
             @intCast(h),
+            self.mipLevels,
+            c.VK_SAMPLE_COUNT_1_BIT,
             c.VK_FORMAT_R8G8B8A8_SRGB,
             c.VK_IMAGE_TILING_OPTIMAL,
-            c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
+            c.VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            c.VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            c.VK_IMAGE_USAGE_SAMPLED_BIT,
             c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             &self.textureImage,
             &self.textureImageMemory
@@ -519,24 +638,22 @@ const HelloTriangleApplication = struct {
             self.textureImage,
             c.VK_FORMAT_R8G8B8A8_SRGB,
             c.VK_IMAGE_LAYOUT_UNDEFINED,
-            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            self.mipLevels
         );
         try self.copyBufferToImage(stagingBuffer, self.textureImage, @intCast(w), @intCast(h));
 
-        try self.transitionImageLayout(
-            self.textureImage,
-            c.VK_FORMAT_R8G8B8A8_SRGB,
-            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            c.VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL
-        );
-
         c.vkDestroyBuffer(self.device, stagingBuffer, null);
         c.vkFreeMemory(self.device, stagingBufferMemory, null);
+
+        try self.generateMipmaps(self.textureImage, c.VK_FORMAT_R8G8B8A8_SRGB, @intCast(w), @intCast(h), self.mipLevels);
     }
     fn createImage(
         self: *Self,
         width: u32,
         height: u32,
+        mipLevels: u32,
+        numSamples: c.VkSampleCountFlagBits,
         format: c.VkFormat,
         tiling: c.VkImageTiling,
         usage: c.VkImageUsageFlags,
@@ -551,14 +668,14 @@ const HelloTriangleApplication = struct {
             .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .pNext = null,
             .extent = .{ .width = width, .height = height, .depth = 1 },
-            .mipLevels = 1,
+            .mipLevels = mipLevels,
             .arrayLayers = 1,
             .format = format,
             .tiling = tiling,
             .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
             .usage = usage,
             .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .samples = numSamples,
             .imageType = c.VK_IMAGE_TYPE_2D,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,
@@ -791,6 +908,12 @@ const HelloTriangleApplication = struct {
         try vkDie(c.vkBindBufferMemory(self.device, buffer.*, bufferMemory.*, 0));
     }
     fn cleanupSwapChain(self: *Self) void {
+
+        c.vkDestroyImageView(self.device, self.colorImageView, null);
+        c.vkDestroyImage(self.device, self.colorImage, null);
+        c.vkFreeMemory(self.device, self.colorImageMemory, null);
+
+
         self.allocator.free(self.swapChainImages);
         for (self.swapChainFramebuffers) |framebuffer| {
             c.vkDestroyFramebuffer(self.device, framebuffer, null);
@@ -817,7 +940,7 @@ const HelloTriangleApplication = struct {
 
         try self.createSwapChain();
         try self.createImageViews();
-
+        try self.createColorResource();
         try self.createDepthResources();
         try self.createFramebuffers();
     }
@@ -912,6 +1035,7 @@ const HelloTriangleApplication = struct {
         c.vkCmdSetScissor(commandBuffer, 0, 1, &c.VkRect2D{ .offset = .{ .x = 0.0, .y = 0.0 }, .extent = self.swapChainExtent });
 
         c.vkCmdBindDescriptorSets(commandBuffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipelineLayout, 0, 1, &self.descriptorSets[self.currentFrame], 0, null);
+
         c.vkCmdDrawIndexed(commandBuffer, @intCast(self.indices.items.len), 1, 0, 0, 0);
         c.vkCmdEndRenderPass(commandBuffer);
         try vkDie(c.vkEndCommandBuffer(commandBuffer));
@@ -944,8 +1068,8 @@ const HelloTriangleApplication = struct {
             const framebufferCreateInfo: c.VkFramebufferCreateInfo = .{
                 .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
                 .renderPass = self.renderPass,
-                .attachmentCount = 2,
-                .pAttachments = &[_]c.VkImageView{self.swapChainImageViews[i], self.depthImageView},
+                .attachmentCount = 3,
+                .pAttachments = &[3]c.VkImageView{self.colorImageView, self.depthImageView,  self.swapChainImageViews[i]},
                 .width = self.swapChainExtent.width,
                 .height = self.swapChainExtent.height,
                 .layers = 1,
@@ -958,13 +1082,13 @@ const HelloTriangleApplication = struct {
     fn createRenderPass(self: *Self) !void {
         const colorAttachmentDescription: c.VkAttachmentDescription = .{
             .format = self.swapChainImageFormat,
-            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .samples = self.msaaSamples,
             .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .finalLayout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .flags = 0 
         };
 
@@ -973,7 +1097,7 @@ const HelloTriangleApplication = struct {
 
         const depthAttachmentDescription: c.VkAttachmentDescription = .{
             .format = try self.findDepthFormat(),
-            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .samples = self.msaaSamples,
             .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -988,6 +1112,25 @@ const HelloTriangleApplication = struct {
             .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL 
         };
 
+
+        const colorAttachmentResolve: c.VkAttachmentDescription = .{
+            .format = self.swapChainImageFormat,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .flags = 0
+        };
+
+        const colorAttachmentResolveRef: c.VkAttachmentReference = .{
+            .attachment = 2,
+            .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        };
+
+
         const subpassDescription: c.VkSubpassDescription = .{
             .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
             .colorAttachmentCount = 1,
@@ -995,7 +1138,7 @@ const HelloTriangleApplication = struct {
             .inputAttachmentCount = 0,
             .pInputAttachments = null,
             .pDepthStencilAttachment = &depthAttachmentRef,
-            .pResolveAttachments = null,
+            .pResolveAttachments = &colorAttachmentResolveRef,
             .preserveAttachmentCount = 0,
             .pPreserveAttachments = null,
             .flags = 0
@@ -1026,8 +1169,8 @@ const HelloTriangleApplication = struct {
         const renderPassCreateInfo: c.VkRenderPassCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
             .pNext = null,
-            .attachmentCount = 2,
-            .pAttachments = &[_]c.VkAttachmentDescription{colorAttachmentDescription, depthAttachmentDescription},
+            .attachmentCount = 3,
+            .pAttachments = &[3]c.VkAttachmentDescription{colorAttachmentDescription, depthAttachmentDescription, colorAttachmentResolve},
             .subpassCount = 1,
             .pSubpasses = &subpassDescription,
             .dependencyCount = 2,
@@ -1143,7 +1286,7 @@ const HelloTriangleApplication = struct {
         const multiSamplingCreateInfo: c.VkPipelineMultisampleStateCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .sampleShadingEnable = c.VK_FALSE,
-            .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
+            .rasterizationSamples = self.msaaSamples,
             .minSampleShading = 1.0,
             .pSampleMask = null,
             .alphaToCoverageEnable = c.VK_FALSE,
@@ -1176,7 +1319,6 @@ const HelloTriangleApplication = struct {
             .pNext = null,
             .flags = 0 
         };
-
 
         const pipelineLayoutCreateInfo: c.VkPipelineLayoutCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1241,7 +1383,7 @@ const HelloTriangleApplication = struct {
     }
     fn createImageViews(self: *Self) !void {
         for (self.swapChainImages, 0..) |image, i| {
-            self.swapChainImageViews[i] = try self.createImageView(image, self.swapChainImageFormat, c.VK_IMAGE_ASPECT_COLOR_BIT);
+            self.swapChainImageViews[i] = try self.createImageView(image, self.swapChainImageFormat, c.VK_IMAGE_ASPECT_COLOR_BIT, 1);
         }
     }
     fn createSwapChain(self: *Self) !void {
@@ -1427,6 +1569,7 @@ const HelloTriangleApplication = struct {
             }
         }
         self.physicalDevice = device orelse return error.FailedToFindSuitableGPU;
+        self.msaaSamples = self.getMaxUsableSampleCount();
     }
     fn setupDebugMessenger(self: *Self) !void {
         const createInfo: c.VkDebugUtilsMessengerCreateInfoEXT = .{ .sType = c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT, .messageSeverity = c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |

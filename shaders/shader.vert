@@ -17,4 +17,5 @@ void main() {
 	const mat4 mvp = ubo.proj * ubo.view * ubo.model;
 	gl_Position = mvp * vec4(inPosition, 1.0);
 	fragTexCoord = inTexCoord;
+	fragColor = inColor;
 }
